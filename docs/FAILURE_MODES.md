@@ -1,0 +1,2 @@
+# FAILURE MODES
+Documentation placeholder.

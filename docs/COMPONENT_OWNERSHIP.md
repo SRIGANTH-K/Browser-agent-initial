@@ -1,0 +1,2 @@
+# COMPONENT OWNERSHIP
+Documentation placeholder.

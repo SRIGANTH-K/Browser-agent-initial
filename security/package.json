@@ -1,0 +1,5 @@
+{
+  "name": "browser-agent-security",
+  "private": true,
+  "scripts": { "build": "tsc", "test": "vitest run" }
+}

@@ -1,0 +1,1 @@
+// Extension message types placeholder.

@@ -1,0 +1,5 @@
+{
+  "name": "browser-agent-vision",
+  "private": true,
+  "scripts": { "build": "tsc", "test": "vitest run" }
+}

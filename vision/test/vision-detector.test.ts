@@ -1,0 +1,1 @@
+// Vision detector tests placeholder.

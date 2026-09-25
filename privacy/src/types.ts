@@ -1,0 +1,1 @@
+// Privacy types placeholder.

@@ -1,0 +1,1 @@
+// Secret setup controller placeholder.

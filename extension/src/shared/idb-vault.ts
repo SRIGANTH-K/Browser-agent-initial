@@ -1,0 +1,1 @@
+// IndexedDB vault integration placeholder.

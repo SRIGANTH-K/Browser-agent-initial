@@ -1,0 +1,5 @@
+{
+  "name": "browser-agent-evaluation",
+  "private": true,
+  "scripts": { "test": "vitest run" }
+}

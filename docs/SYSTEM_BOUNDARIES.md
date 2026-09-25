@@ -1,0 +1,2 @@
+# SYSTEM BOUNDARIES
+Documentation placeholder.

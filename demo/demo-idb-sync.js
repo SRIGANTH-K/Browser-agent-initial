@@ -1,0 +1,1 @@
+// Demo IndexedDB synchronization placeholder.

@@ -1,0 +1,5 @@
+{
+  "name": "browser-agent-extension",
+  "private": true,
+  "scripts": { "build": "vite build", "test": "vitest run" }
+}
