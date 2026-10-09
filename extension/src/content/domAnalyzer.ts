@@ -253,6 +253,16 @@ function getSafeValue(
   return null;
 }
 
+function getResultContext(el: HTMLAnchorElement): string | null {
+  // Include bounded nearby result-card text so the planner can compare a
+  // result title, price, and variant after a search.
+  const card = el.closest("article, [role='listitem'], li, [data-asin]");
+  if (!card) return null;
+
+  const text = card.textContent?.replace(/\s+/g, " ").trim() || "";
+  return text ? text.slice(0, 500) : null;
+}
+
 /**
  * Removes the current browser-agent highlight overlay.
  */
@@ -381,12 +391,21 @@ export function analyzeDom(): PageAnalysis {
         checked = el.checked;
       }
 
-      const text =
+      let text =
         el instanceof HTMLButtonElement ||
         el instanceof HTMLAnchorElement ||
         el.getAttribute("role") === "button"
           ? el.textContent?.trim().slice(0, 100) || null
           : null;
+
+      if (el instanceof HTMLAnchorElement) {
+        const resultContext = getResultContext(el);
+        if (resultContext && text && !resultContext.includes(text)) {
+          text = `${text} — ${resultContext}`.slice(0, 500);
+        } else if (resultContext && !text) {
+          text = resultContext;
+        }
+      }
 
       const required =
         "required" in el
@@ -403,7 +422,7 @@ export function analyzeDom(): PageAnalysis {
         tag: el.tagName.toLowerCase(),
         role: el.closest("nav, header, [role='navigation']")
           ? "nav-item"
-          : (el.getAttribute("role") || undefined),
+          : (el.getAttribute("role") || null),
         name: el.getAttribute("name"),
         label,
         type,

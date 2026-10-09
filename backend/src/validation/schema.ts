@@ -14,12 +14,18 @@ export const SanitizedButtonSchema = z.object({
   target: z.string()
 });
 
+export const SanitizedLinkSchema = z.object({
+  text: z.string().optional(),
+  target: z.string()
+});
+
 export const SanitizedContextSchema = z.object({
   user_task: z.string(),
   page_title: z.string().optional(),
   page_url: z.string().optional(),
   fields: z.array(SanitizedFieldSchema).optional(),
   buttons: z.array(SanitizedButtonSchema).optional(),
+  links: z.array(SanitizedLinkSchema).optional(),
   // Backward-compat: single button
   button: SanitizedButtonSchema.optional()
 });
@@ -159,29 +165,56 @@ export function validateAndSanitizeVlmResponse(
       allowedTargets.add(b.target);
     }
   }
+  if (context.links) {
+    for (const link of context.links) {
+      allowedTargets.add(link.target);
+    }
+  }
 
-  // 5. Action checks: Target existence & TYPE_REFERENCE token validity
+  // 5. Action checks: Target existence & TYPE_REFERENCE token validity.
+  // A model can occasionally append one malformed action after otherwise valid
+  // actions. Drop only the malformed action; never reject valid actions or pass
+  // an unknown target to the browser executor.
+  const safeActions = [];
+  const rejectedActions: string[] = [];
   for (const act of actions) {
     // Target check
+    if (act.action === 'NAVIGATE' && /^https?:\/\//i.test(act.target)) {
+      safeActions.push(act);
+      continue;
+    }
     if (!allowedTargets.has(act.target)) {
-      return {
-        valid: false,
-        response: EMPTY_ACTION_FALLBACK,
-        errorReason: `Target element '${act.target}' was not present in original request context`
-      };
+      rejectedActions.push(`Target element '${act.target}' was not present in original request context`);
+      continue;
     }
 
     // TYPE_REFERENCE reference token check
     if (act.action === 'TYPE_REFERENCE') {
       if (!act.reference || !allowedRefs.has(act.reference)) {
-        return {
-          valid: false,
-          response: EMPTY_ACTION_FALLBACK,
-          errorReason: `TYPE_REFERENCE action missing valid reference token '${act.reference}'`
-        };
+        rejectedActions.push(`TYPE_REFERENCE action missing valid reference token '${act.reference}'`);
+        continue;
       }
     }
+
+    safeActions.push(act);
   }
 
-  return { valid: true, response: data };
+  if (rejectedActions.length > 0) {
+    console.warn(`[VLM Response] Dropped ${rejectedActions.length} invalid action(s): ${rejectedActions.join('; ')}`);
+  }
+
+  if (safeActions.length === 0 && actions.length > 0) {
+    return {
+      valid: true,
+      response: {
+        response_type: 'data',
+        data: {
+          message: 'The planner did not produce a valid action for the current page. No fields were changed.',
+          rejected_actions: rejectedActions,
+        },
+      },
+    };
+  }
+
+  return { valid: true, response: { ...data, actions: safeActions } };
 }

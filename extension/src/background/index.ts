@@ -23,101 +23,20 @@ void initIndexedDBVault().then(() => {
 const BACKEND_URL = "http://localhost:3000/api/reason";
 const BACKEND_API_KEY = "sih-secret-key-2026";
 
-/**
- * Default On-Device Secret Store (SIH Synthetic Demo Profile)
- * In accordance with Person 4 Security specs, real values NEVER leave the device.
- * These defaults are used if the user has not customized the vault via the popup.
- */
-const DEFAULT_SECRETS: Record<string, string> = {
-  NAME_1: "Amrit Mohan",
-  FIRST_NAME_1: "Amrit",
-  LAST_NAME_1: "Mohan",
-  EMAIL_1: "amritmohan201205@gmail.com",
-  PASSWORD_1: "Amrit@12345",
-  PHONE_1: "9876543210",
-  DOB_1: "1998-05-15",
-  PAN_1: "ABCDE1234F",
-  AADHAAR_1: "1234 5678 9012",
-  ADDRESS_1: "402, Lotus Towers, SV Road",
-  CITY_1: "Mumbai",
-  STATE_1: "MH",
-  PINCODE_1: "400001",
-  POLICY_1: "POL12345",
-  AMOUNT_1: "Rs. 50,000",
-};
-
-/**
- * Intelligent secret resolution:
- * Resolves requested reference tokens using direct matches or safe contextual derivations
- * (e.g. extracting first/last name from full name, or mapping government ID aliases).
- */
 function resolveSecret(ref: string, secrets: Record<string, string>): string {
-  if (secrets[ref]) return secrets[ref];
+  const requested = ref.toUpperCase();
+  if (secrets[requested]) return secrets[requested];
 
-  if (ref.startsWith("FIRST_NAME")) {
-    const fullName = secrets["NAME_1"] || secrets["NAME"] || "";
-    if (fullName) return fullName.split(" ")[0];
-  }
-
-  if (ref.startsWith("LAST_NAME")) {
-    const fullName = secrets["NAME_1"] || secrets["NAME"] || "";
-    if (fullName) {
-      const parts = fullName.split(" ");
-      return parts.length > 1 ? parts.slice(1).join(" ") : "";
-    }
-  }
-
-  if (ref.startsWith("NAME")) {
-    const fn = secrets["FIRST_NAME_1"] || secrets["FIRST_NAME"] || "";
-    const ln = secrets["LAST_NAME_1"] || secrets["LAST_NAME"] || "";
-    if (fn || ln) return `${fn} ${ln}`.trim();
-  }
-
-  if (ref.startsWith("PAN")) {
-    return secrets["PAN_1"] || secrets["PAN"] || secrets["GOVID_1"] || "";
-  }
-
-  if (ref.startsWith("AADHAAR")) {
-    return secrets["AADHAAR_1"] || secrets["AADHAAR"] || secrets["GOVID_2"] || secrets["GOVID_1"] || "";
-  }
-
-  if (ref.startsWith("GOVID")) {
-    return secrets["GOVID_1"] || secrets["PAN_1"] || secrets["AADHAAR_1"] || "";
-  }
-
-  if (ref.startsWith("MOBILE") || ref.startsWith("PHONE")) {
-    return secrets["PHONE_1"] || secrets["MOBILE_1"] || "";
-  }
-
-  if (ref.startsWith("PINCODE") || ref.startsWith("ZIP")) {
-    return secrets["PINCODE_1"] || secrets["ZIP_1"] || "";
-  }
-
-  if (ref.startsWith("CITY")) {
-    return secrets["CITY_1"] || "";
-  }
-
-  if (ref.startsWith("STATE")) {
-    return secrets["STATE_1"] || "";
-  }
-
-  if (ref.startsWith("ADDRESS")) {
-    return secrets["ADDRESS_1"] || "";
-  }
-
-  if (ref.startsWith("DOB")) {
-    return secrets["DOB_1"] || "";
-  }
-
-  if (ref.startsWith("POLICY")) {
-    return secrets["POLICY_1"] || "";
-  }
-
-  if (ref.startsWith("PASSWORD") || ref.startsWith("PASS")) {
-    return secrets["PASSWORD_1"] || secrets["PASSWORD"] || "";
-  }
-
-  return "";
+  // Match equivalent user-provided keys without relying on any stored value.
+  const canonical = (value: string) => value
+    .toUpperCase()
+    .replace(/MOBILE_NUMBER/g, "PHONE")
+    .replace(/PHONE_NUMBER/g, "PHONE")
+    .replace(/PIN_CODE/g, "PINCODE")
+    .replace(/ZIP_CODE/g, "PINCODE");
+  const canonicalRequested = canonical(requested);
+  const matchingKey = Object.keys(secrets).find((key) => canonical(key) === canonicalRequested);
+  return matchingKey ? secrets[matchingKey] : "";
 }
 
 /**
@@ -135,13 +54,24 @@ async function loadOnDeviceSecrets(): Promise<Record<string, string>> {
       return secrets;
     }
   } catch (err) {
-    console.warn("[IndexedDB-Vault] Fallback to default secrets:", err);
+    console.error("[IndexedDB-Vault] Could not read the user vault:", err);
+    throw new Error("Unable to read saved information from IndexedDB.");
   }
-  return { ...DEFAULT_SECRETS };
+  return {};
 }
 
 function getStorageKey(tabId: number): string {
   return `browserAgent.lastResult.${tabId}`;
+}
+
+function compactContextText(value: string, maxLength = 140): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function isFinalPurchaseAction(target: string, analysis: PageAnalysis): boolean {
+  const field = analysis.fields.find((candidate) => candidate.id === target);
+  const text = `${field?.text || ""} ${field?.label || ""} ${field?.name || ""} ${field?.id || ""}`;
+  return /\b(place order|buy now|purchase|pay now|confirm order|confirm purchase|submit order|complete order)\b/i.test(text);
 }
 
 async function getActiveTabId(): Promise<number> {
@@ -183,15 +113,36 @@ async function forwardToActiveTab(
   await browser.tabs.sendMessage(tabId, message);
 }
 
+function isContentScriptDisconnected(error: unknown): boolean {
+  return error instanceof Error &&
+    /receiving end does not exist|could not establish connection|message port closed/i.test(error.message);
+}
+
 async function analyzeActivePage(): Promise<{
   tabId: number;
   analysis: PageAnalysis;
 }> {
   const tabId = await getActiveTabId();
 
-  const response = (await browser.tabs.sendMessage(tabId, {
-    type: "ANALYZE_PAGE",
-  })) as AnalyzePageResponse;
+  let response: AnalyzePageResponse;
+  try {
+    response = (await browser.tabs.sendMessage(tabId, {
+      type: "ANALYZE_PAGE",
+    })) as AnalyzePageResponse;
+  } catch (error) {
+    if (!isContentScriptDisconnected(error)) throw error;
+
+    // Tabs that were already open when the extension was reloaded do not have
+    // the new content script. Reload once so Chrome injects the declared
+    // content script, then retry the local analysis.
+    console.warn("[Agent] Content script is stale; reloading the active tab once to reconnect.");
+    await browser.tabs.reload(tabId);
+    await waitForTabComplete(tabId, 10000);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    response = (await browser.tabs.sendMessage(tabId, {
+      type: "ANALYZE_PAGE",
+    })) as AnalyzePageResponse;
+  }
 
   return {
     tabId,
@@ -254,6 +205,7 @@ function buildSanitizedPayload(
     sensitive: boolean;
   }> = [];
   const buttons: Array<{ target: string; text: string; isNav?: boolean }> = [];
+  const links: Array<{ target: string; text: string }> = [];
   for (const field of analysis.fields) {
     // Collect buttons/submit elements (exclude passive nav links)
     const isButton = field.tag === "button" || 
@@ -265,17 +217,18 @@ function buildSanitizedPayload(
       const isNav = field.role === "nav-item" || Boolean(field.id?.toLowerCase().includes("nav") || field.name?.toLowerCase().includes("nav"));
       buttons.push({
         target: field.id,
-        text: (field.text || field.label || field.id || "").replace(/\s+/g, " ").trim(),
+        text: compactContextText(field.text || field.label || field.id || ""),
         isNav,
       });
       continue;
     }
 
-
-    // Skip passive links (e.g. navigation links, footer links) from form field lists
     if (field.tag === "a" || field.type === "link") {
+      const linkText = compactContextText(field.text || field.label || field.id || "");
+      if (linkText && field.visible && field.role !== "nav-item") links.push({ target: field.id, text: linkText });
       continue;
     }
+
 
     const idLower = field.id.toLowerCase();
     const nameLower = (field.name || "").toLowerCase();
@@ -357,10 +310,25 @@ function buildSanitizedPayload(
       ref: refToken,
       type: field.type || "text",
       target: field.id,
-      label: fieldLabel,
+      label: compactContextText(fieldLabel),
       sensitive: isSensitive,
     });
   }
+
+  // Keep the planner context bounded while ranking visible result links that
+  // match the user's task ahead of site-navigation links.
+  const boundedFields = sanitizedFields.slice(0, 60);
+  const boundedButtons = buttons.slice(0, 30);
+  const taskTerms = task.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2);
+  const boundedLinks = [...links]
+    .sort((a, b) => {
+      const score = (link: { target: string; text: string }) => {
+        const text = link.text.toLowerCase();
+        return taskTerms.reduce((total, term) => total + (text.includes(term) ? 1 : 0), 0);
+      };
+      return score(b) - score(a);
+    })
+    .slice(0, 120);
 
   const sensitiveItemsProtected = sanitizedFields.filter(f => f.sensitive).length;
   const rawItemsSent = 0; // 0 raw bytes sent — invariant
@@ -369,13 +337,14 @@ function buildSanitizedPayload(
     user_task: task,
     page_title: analysis.title,
     page_url: analysis.url,
-    fields: sanitizedFields,
-    buttons,
+    fields: boundedFields,
+    buttons: boundedButtons,
+    links: boundedLinks,
     // Select primary submit/action button, distinguishing form action from header nav
     button: (() => {
       const taskLower = task.toLowerCase();
-      const formButtons = buttons.filter(b => !b.isNav);
-      const candidates = formButtons.length > 0 ? formButtons : buttons;
+       const formButtons = boundedButtons.filter(b => !b.isNav);
+       const candidates = formButtons.length > 0 ? formButtons : boundedButtons;
 
       let submitBtn: { target: string; text: string } | undefined;
 
@@ -406,7 +375,8 @@ function buildSanitizedPayload(
 
 async function handleAskAI(
   task: string,
-  userProtectedFieldIds: UserProtectedFieldIds = []
+  userProtectedFieldIds: UserProtectedFieldIds = [],
+  iteration = 0
 ): Promise<AskAIResult> {
   console.log("%c[Browser-Agent] 🚀 Starting On-Device Agent Workflow", "color: #0284c7; font-weight: bold; font-size: 13px;");
   console.log(`%c[User-Task] "${task}"`, "color: #0f172a; font-weight: 600;");
@@ -466,65 +436,8 @@ async function handleAskAI(
       } catch {
         navigateTargetUrl = explicitTargetUrl;
       }
-    } else if (currentUrl.startsWith("chrome://") || currentUrl.startsWith("chrome-search://") || currentUrl.startsWith("edge://") || currentUrl.startsWith("about:") || currentUrl === "") {
-      // User is on an internal / blank tab without mentioning a target website
-      navigateTargetUrl = "https://accounts.google.com";
-    } else if (currentUrl.includes("google.com") && !currentUrl.includes("accounts.google.com") && /google.*login|login.*google|sign.*in.*google/i.test(taskLower)) {
-      navigateTargetUrl = "https://accounts.google.com";
     }
 
-
-    // Smart link discovery: if user wants to sign up or log in on ANY website,
-    // check URL first — if not already on signup/login page, find and click the right link.
-    if (!navigateTargetUrl && !currentUrl.startsWith("chrome://") && !currentUrl.startsWith("about:")) {
-      const isSignupIntent = /sign.*up|register|join|create.*account|new.*seeker|begin.*journey/i.test(taskLower);
-      const isLoginIntent = !isSignupIntent && /log.*in|sign.*in/i.test(taskLower);
-
-      if (isSignupIntent || isLoginIntent) {
-        // Check URL: are we already on a signup/login page?
-        const alreadyOnTarget = isSignupIntent
-          ? /signup|register|join|create-account/i.test(currentUrl)
-          : /login|signin|sign-in/i.test(currentUrl);
-
-        if (!alreadyOnTarget) {
-          console.log(`%c[Agent-Navigator] 🔍 Not on ${isSignupIntent ? "signup" : "login"} page yet. Scanning current page for navigation links...`, "color: #0284c7;");
-          
-          // Scan the current page for matching links
-          const preCheck = await analyzeActivePage().catch(() => null);
-          const pageLinks = preCheck?.analysis?.fields?.filter((f: any) => f.tag === "a") || [];
-
-          let matchedLink: string | null = null;
-          if (isSignupIntent) {
-            const signupLink = pageLinks.find((f: any) => {
-              const combo = `${f.id} ${f.text || ""} ${f.label || ""} ${f.name || ""}`.toLowerCase();
-              return /sign.*up|register|join|create|begin.*journey|new.*seeker/i.test(combo);
-            });
-            if (signupLink) matchedLink = signupLink.id;
-          } else {
-            const loginLink = pageLinks.find((f: any) => {
-              const combo = `${f.id} ${f.text || ""} ${f.label || ""} ${f.name || ""}`.toLowerCase();
-              return /log.*in|sign.*in|login/i.test(combo);
-            });
-            if (loginLink) matchedLink = loginLink.id;
-          }
-
-          if (matchedLink) {
-            console.log(`%c[Agent-Navigator] 🔗 Found link "${matchedLink}", clicking to navigate...`, "color: #0284c7; font-weight: bold;");
-            await executeDomActionInTab(tabId, "CLICK", matchedLink);
-            await waitForTabComplete(tabId);
-            await new Promise((r) => setTimeout(r, 2000));
-          } else {
-            // Fallback: guess common URL pattern
-            try {
-              const urlObj = new URL(currentUrl);
-              navigateTargetUrl = isSignupIntent
-                ? `${urlObj.origin}/register`
-                : `${urlObj.origin}/login`;
-            } catch {}
-          }
-        }
-      }
-    }
 
     if (navigateTargetUrl) {
       console.log(`%c[Agent-Navigator] 🌐 Navigating active tab to ${navigateTargetUrl}...`, "color: #0284c7; font-weight: bold;");
@@ -561,6 +474,31 @@ async function handleAskAI(
     console.log(`%c[Privacy-Engine] 🛡️ Shielded ${sensitiveItemsProtected} sensitive fields with abstract tokens:`, "color: #7c3aed; font-weight: bold;", payload.fields);
     console.log("%c[Zero-Leakage Invariant] 0 bytes raw PII transmitted. Passwords strictly excluded.", "color: #16a34a; font-weight: bold;");
 
+    const missingRequired = payload.fields
+      .filter((field) => {
+        const pageField = analysis.fields.find((candidate) => candidate.id === field.target);
+        // Consent controls are actions, not saved personal details. Their label may
+        // mention sensitive topics (for example Aadhaar/PAN) without needing a vault value.
+        const consentText = `${field.label} ${pageField?.label || ""} ${pageField?.name || ""}`;
+        const isConsentControl = field.type === "checkbox" || field.type === "radio" ||
+          /\b(agree|confirm|consent|accept|authorize|terms|privacy policy)\b/i.test(consentText);
+        return !isConsentControl && field.sensitive && pageField?.required && !resolveSecret(field.ref, secrets);
+      })
+      .map((field) => field.label || field.target);
+
+    if (missingRequired.length > 0) {
+      const result: AskAIResult = {
+        type: "ASK_AI_RESULT",
+        sensitiveItemsProtected,
+        rawItemsSent,
+        analysis,
+        userProtectedFieldIds,
+        serverInstruction: `I need these saved values before I can fill the form: ${missingRequired.join(", ")}. Add them in the IndexedDB Vault, then run the task again. No fields were changed.`,
+      };
+      await browser.storage.local.set({ [getStorageKey(tabId)]: result });
+      return result;
+    }
+
     let serverInstruction: string | null = null;
     let executedCount = 0;
 
@@ -582,8 +520,27 @@ async function handleAskAI(
         console.log(`%c[Remote-VLM] 📥 VLM Reasoning Plan Received (${vlmElapsed}ms):`, "color: #16a34a; font-weight: bold;", data.actions);
 
         if (data.response_type === "action" && Array.isArray(data.actions)) {
+          const missingReferences = data.actions
+            .filter((action: any) => {
+              if (action.action !== "TYPE_REFERENCE") return false;
+              const field = payload.fields.find((candidate) => candidate.target === action.target);
+              // FIELD_N tokens describe ordinary fields, not values that belong in the vault.
+              return Boolean(field?.sensitive) && !resolveSecret(action.reference || "", secrets);
+            })
+            .map((action: any) => action.reference)
+            .filter(Boolean);
+
+          if (missingReferences.length > 0) {
+            serverInstruction = `I need these saved values before I can continue: ${missingReferences.join(", ")}. Add them in the IndexedDB Vault, then run the task again. No fields were changed.`;
+          } else {
+          let purchaseConfirmationRequired = false;
           // Execute each approved action sequentially against the live DOM
           for (const act of data.actions) {
+            if (act.action === "CLICK" && isFinalPurchaseAction(act.target, analysis)) {
+              purchaseConfirmationRequired = true;
+              console.log(`%c[Safety] ⏸️ Stopped before final purchase action; user confirmation is required.`, "color: #d97706;");
+              continue;
+            }
             if (act.action === "TYPE_REFERENCE") {
               let localSecret = await resolveVaultReference(act.reference);
               if (!localSecret) {
@@ -605,12 +562,21 @@ async function handleAskAI(
               await new Promise((r) => setTimeout(r, 400));
               await executeDomActionInTab(tabId, "CLICK", act.target);
               executedCount++;
+              const clickedField = analysis.fields.find((field) => field.id === act.target);
+              if (iteration < 8 && (clickedField?.tag === "a" || clickedField?.type === "button")) {
+                await waitForTabComplete(tabId, 4000);
+                await new Promise((r) => setTimeout(r, 700));
+                return handleAskAI(task, userProtectedFieldIds, iteration + 1);
+              }
             } else if (act.action === "NAVIGATE") {
               console.log(`%c[DOM-Executor] 🌐 Navigating to "${act.target}"`, "color: #059669;");
               await browser.tabs.update(tabId, { url: act.target });
               await waitForTabComplete(tabId);
               await new Promise((r) => setTimeout(r, 1200));
               executedCount++;
+              if (iteration < 8) {
+                return handleAskAI(task, userProtectedFieldIds, iteration + 1);
+              }
             } else if (act.action === "SELECT") {
               console.log(`%c[DOM-Executor] 📋 Selecting "${act.value}" in "${act.target}"`, "color: #059669;");
               await executeDomActionInTab(tabId, "SELECT", act.target, act.value);
@@ -618,6 +584,12 @@ async function handleAskAI(
             } else if (act.action === "SCROLL") {
               console.log(`%c[DOM-Executor] 📜 Scrolling to "${act.target}"`, "color: #059669;");
               await executeDomActionInTab(tabId, "SCROLL", act.target);
+              if (iteration < 8) {
+                // Lazy-loaded result cards can expose price text only after
+                // their region enters the viewport. Re-perceive after scroll.
+                await new Promise((r) => setTimeout(r, 900));
+                return handleAskAI(task, userProtectedFieldIds, iteration + 1);
+              }
             } else if (act.action === "WAIT") {
               console.log(`%c[DOM-Executor] ⏳ Waiting...`, "color: #059669;");
               await executeDomActionInTab(tabId, "WAIT", act.target, act.value);
@@ -628,54 +600,34 @@ async function handleAskAI(
           const refCount = data.actions.filter((a: any) => a.action === "TYPE_REFERENCE").length;
           const typeCount = data.actions.filter((a: any) => a.action === "TYPE").length;
           const clickCount = data.actions.filter((a: any) => a.action === "CLICK").length;
-          serverInstruction = `✓ Agent executed ${executedCount} actions (${refCount} protected fields resolved on-device, ${typeCount} fields filled, ${clickCount} clicks). 0 bytes of raw PII left this device.`;
+          serverInstruction = purchaseConfirmationRequired
+            ? `✓ Product details and checkout information are ready. I stopped before the final purchase action. Review the order and confirm manually on the website.`
+            : `✓ Agent executed ${executedCount} actions (${refCount} protected fields resolved on-device, ${typeCount} fields filled, ${clickCount} clicks). 0 bytes of raw PII left this device.`;
           console.log("%c[Agent-Completion] ✅ Task completed successfully with zero privacy leakage!", "color: #16a34a; font-weight: bold; font-size: 13px;");
+          }
         } else {
-          serverInstruction = data?.instruction ?? "Task analyzed.";
+          const plannerData = data?.data && typeof data.data === "object" ? data.data : {};
+          const missingItems = Array.isArray(plannerData.missing)
+            ? plannerData.missing
+            : Array.isArray(plannerData.required)
+              ? plannerData.required
+              : Array.isArray(plannerData.questions)
+                ? plannerData.questions
+                : [];
+          const detail = data?.message || data?.instruction || plannerData.message;
+          serverInstruction = detail || (missingItems.length > 0
+            ? `I need more information: ${missingItems.join(", ")}.`
+            : "The planner needs more information before it can continue.");
         }
       } else {
         const errorText = await response.text().catch(() => "");
-        console.warn(`[Backend] Status ${response.status}: ${errorText.slice(0, 100)}. Triggering on-device fast-path execution.`);
-        for (const f of payload.fields) {
-          if (f.type === "checkbox") {
-            await executeDomActionInTab(tabId, "CLICK", f.target);
-            executedCount++;
-          } else if (f.sensitive) {
-            const val = resolveSecret(f.ref, secrets);
-            if (val) {
-              await executeDomActionInTab(tabId, "TYPE", f.target, val);
-              executedCount++;
-            }
-          }
-        }
-        if (payload.button?.target) {
-          await new Promise((r) => setTimeout(r, 400));
-          await executeDomActionInTab(tabId, "CLICK", payload.button.target);
-          executedCount++;
-        }
-        serverInstruction = `✓ On-device engine filled ${executedCount} fields & submitted form safely (Cloud rate-limited/offline). 0 bytes PII leaked.`;
+        throw new Error(`Agent planner unavailable (${response.status}). ${errorText.slice(0, 120)}`);
       }
     } catch (err) {
-      console.warn("[Backend-Fallback] Running local fast-path executor:", err);
-      for (const f of payload.fields) {
-        if (f.type === "checkbox") {
-          await executeDomActionInTab(tabId, "CLICK", f.target);
-          executedCount++;
-        } else if (f.sensitive) {
-          const val = resolveSecret(f.ref, secrets);
-          if (val) {
-            await executeDomActionInTab(tabId, "TYPE", f.target, val);
-            executedCount++;
-          }
-        }
-      }
-      if (payload.button?.target) {
-        await new Promise((r) => setTimeout(r, 400));
-        await executeDomActionInTab(tabId, "CLICK", payload.button.target);
-        executedCount++;
-      }
-
-      serverInstruction = `✓ Local fast-path filled ${executedCount} fields & submitted form safely on-device (Backend offline). 0 bytes PII leaked.`;
+      console.warn("[Agent] Planner unavailable; no fields were changed:", err);
+      serverInstruction = err instanceof Error
+        ? `${err.message} No fields were changed.`
+        : "Agent planner unavailable. No fields were changed.";
     }
 
     const result: AskAIResult = {
@@ -700,10 +652,9 @@ async function handleAskAI(
       analysis: null,
       userProtectedFieldIds,
       serverInstruction: null,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Unknown error",
+      error: error instanceof Error && /receiving end does not exist|could not establish connection/i.test(error.message)
+        ? "The active webpage is not connected to Browser Agent. Open a normal webpage, reload it once, and run the agent again."
+        : error instanceof Error ? error.message : "Unknown error",
     };
 
     return result;

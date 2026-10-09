@@ -11,13 +11,47 @@ export async function callVlm(contextPayload: Record<string, any>): Promise<stri
   const isLocalProvider = provider === 'vllm' || provider === 'ollama' || provider === 'local';
   const hasAuthOrLocal = Boolean(config.vlmApiKey) || isLocalProvider;
 
-  // Mock mode for local development, unit tests, or when no auth and not a local provider
-  if (provider === 'mock' || !hasAuthOrLocal || config.nodeEnv === 'test') {
-    console.log('[VLM-Client] Using mock mode (no API key, VLM_PROVIDER=mock, or NODE_ENV=test)');
-    return generateMockVlmResponse(contextPayload);
+  if (provider === 'mock') {
+    throw new Error('Mock VLM provider is disabled. Configure a real VLM_PROVIDER.');
+  }
+  if (!hasAuthOrLocal && config.nodeEnv !== 'test') {
+    throw new Error(`Missing API key for VLM provider '${provider}'.`);
+  }
+  if (config.nodeEnv === 'test') {
+    throw new Error('VLM calls are disabled in test mode.');
   }
 
-  const promptText = `User Task: ${contextPayload.user_task}\nPage Context: ${JSON.stringify(contextPayload)}`;
+  const taskTerms = String(contextPayload.user_task || "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((term) => term.length > 2);
+  const relevantLinks = Array.isArray(contextPayload.links)
+    ? [...contextPayload.links]
+      .sort((a, b) => {
+        const score = (link: any) => taskTerms.reduce((total, term) =>
+          total + (String(link.text || "").toLowerCase().includes(term) ? 1 : 0), 0);
+        return score(b) - score(a);
+      })
+      .slice(0, 40)
+      .map((link: any) => ({ target: link.target, text: String(link.text || "").slice(0, 140) }))
+    : undefined;
+  const compactContext = {
+    user_task: contextPayload.user_task,
+    page_title: contextPayload.page_title,
+    page_url: contextPayload.page_url,
+    fields: Array.isArray(contextPayload.fields) ? contextPayload.fields.slice(0, 40) : undefined,
+    buttons: Array.isArray(contextPayload.buttons) ? contextPayload.buttons.slice(0, 20) : undefined,
+    links: relevantLinks,
+    button: contextPayload.button,
+  };
+  const serializedContext = JSON.stringify(compactContext);
+  if (serializedContext.length > 24000) {
+    throw new Error(`Planner context is too large (${serializedContext.length} characters).`);
+  }
+  const plannerNudge = typeof contextPayload.planner_nudge === 'string'
+    ? `\nPlanner continuation instruction: ${contextPayload.planner_nudge}`
+    : '';
+  const promptText = `User Task: ${contextPayload.user_task}\nPage Context: ${serializedContext}${plannerNudge}`;
 
   console.log(`[VLM-Client] Calling ${provider} (model: ${config.vlmModel || (provider === 'vllm' ? 'Qwen/Qwen2-VL-7B-Instruct' : provider === 'ollama' ? 'llama3.2-vision' : 'default')})...`);
   const startTime = Date.now();
@@ -25,7 +59,7 @@ export async function callVlm(contextPayload: Record<string, any>): Promise<stri
   try {
     let result: string;
 
-    if (provider === 'openai' || provider === 'vllm' || provider === 'ollama' || provider === 'local') {
+    if (provider === 'openai' || provider === 'groq' || provider === 'vllm' || provider === 'ollama' || provider === 'local') {
       result = await callOpenAI(promptText);
     } else if (provider === 'anthropic') {
       result = await callAnthropic(promptText);
@@ -39,50 +73,9 @@ export async function callVlm(contextPayload: Record<string, any>): Promise<stri
     console.log(`[VLM-Client] ${provider} responded in ${elapsed}ms (${result.length} chars)`);
     return result;
   } catch (err: any) {
-    console.warn(`[VLM-Client] Remote VLM call failed (${err?.message || 'network error'}). Seamlessly failing over to local deterministic engine.`);
-    return generateMockVlmResponse(contextPayload);
+    console.error(`[VLM-Client] Remote VLM call failed: ${err?.message || 'network error'}`);
+    throw err;
   }
-}
-
-function generateMockVlmResponse(contextPayload: Record<string, any>): string {
-  const actions: Array<Record<string, any>> = [];
-
-  if (contextPayload.fields && Array.isArray(contextPayload.fields)) {
-    for (const field of contextPayload.fields) {
-      if (field.type === 'checkbox') {
-        actions.push({
-          action: 'CLICK',
-          target: field.target
-        });
-      } else if (field.ref && field.target) {
-        actions.push({
-          action: 'TYPE_REFERENCE',
-          target: field.target,
-          reference: field.ref
-        });
-      }
-    }
-  }
-
-  const submitButton = contextPayload.button || (contextPayload.buttons && contextPayload.buttons[0]);
-  if (submitButton && submitButton.target) {
-    actions.push({
-      action: 'CLICK',
-      target: submitButton.target
-    });
-  }
-
-  if (actions.length === 0) {
-    actions.push({
-      action: 'CLICK',
-      target: 'default_button'
-    });
-  }
-
-  return JSON.stringify({
-    response_type: 'action',
-    actions
-  });
 }
 
 async function callOpenAI(promptText: string): Promise<string> {
@@ -93,13 +86,17 @@ async function callOpenAI(promptText: string): Promise<string> {
       endpoint = 'http://localhost:8000/v1/chat/completions';
     } else if (provider === 'ollama') {
       endpoint = 'http://localhost:11434/v1/chat/completions';
+    } else if (provider === 'groq') {
+      endpoint = 'https://api.groq.com/openai/v1/chat/completions';
     } else {
       endpoint = 'https://api.openai.com/v1/chat/completions';
     }
   }
 
   const defaultModel =
-    provider === 'vllm'
+    provider === 'groq'
+      ? 'openai/gpt-oss-20b'
+      : provider === 'vllm'
       ? 'Qwen/Qwen2-VL-7B-Instruct'
       : provider === 'ollama'
         ? 'llama3.2-vision'
@@ -112,7 +109,7 @@ async function callOpenAI(promptText: string): Promise<string> {
     headers['Authorization'] = `Bearer ${config.vlmApiKey}`;
   }
 
-  const response = await fetch(endpoint, {
+  const request = {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -123,7 +120,19 @@ async function callOpenAI(promptText: string): Promise<string> {
       ],
       temperature: 0.1
     })
-  });
+  };
+
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    response = await fetch(endpoint, request);
+    if (response.status !== 429 || attempt === 2) break;
+
+    const retryAfter = Number(response.headers.get('retry-after') || '1');
+    const waitMs = Math.min(Math.max(Number.isFinite(retryAfter) ? retryAfter * 1000 : 1000, 1000), 5000);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  if (!response) throw new Error(`${provider.toUpperCase()} request did not return a response.`);
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => '');
@@ -166,7 +175,7 @@ async function callGemini(promptText: string): Promise<string> {
   const modelName = config.vlmModel || 'gemini-3.6-flash';
   const endpoint = config.vlmEndpoint || `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${config.vlmApiKey}`;
   
-  const response = await fetch(endpoint, {
+  const request = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -186,7 +195,18 @@ async function callGemini(promptText: string): Promise<string> {
         responseMimeType: 'application/json'
       }
     })
-  });
+  };
+
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    response = await fetch(endpoint, request);
+    const retryable = response.status === 429 || response.status === 500 ||
+      response.status === 502 || response.status === 503 || response.status === 504;
+    if (response.ok || !retryable || attempt === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+  }
+
+  if (!response) throw new Error('Gemini request did not return a response.');
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => '');

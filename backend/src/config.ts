@@ -6,7 +6,7 @@ export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   apiKey: process.env.BACKEND_API_KEY || 'sih-secret-key-2026',
   nodeEnv: process.env.NODE_ENV || 'development',
-  vlmProvider: (process.env.VLM_PROVIDER || 'mock').toLowerCase(),
+  vlmProvider: (process.env.VLM_PROVIDER || 'gemini').toLowerCase(),
   vlmApiKey: process.env.VLM_API_KEY || '',
   vlmModel: process.env.VLM_MODEL || 'gemini-3.6-flash',
   vlmEndpoint: process.env.VLM_ENDPOINT || '',

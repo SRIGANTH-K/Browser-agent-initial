@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import browser from "webextension-polyfill";
 import type {
   AskAIRequest,
@@ -8,6 +8,7 @@ import type {
 import {
   getAllVaultSecrets,
   saveVaultSecret,
+  deleteVaultSecret,
   type VaultSecretItem,
 } from "../shared/idb-vault";
 
@@ -15,137 +16,35 @@ type ActiveTab = "agent" | "privacy" | "vault";
 
 type StoredVaultSecret = VaultSecretItem;
 
-const INITIAL_VAULT: StoredVaultSecret[] = [
-  {
-    id: "sec_name_1",
-    ref: "NAME_1",
-    category: "NAME",
-    label: "Full Legal Name",
-    decryptedValue: "Amrit Mohan",
-    encryptedCiphertext: "dGhpcy1pcy1hbi1hZXMtZ2NtLTI1Ni1lbmNyeXB0ZWQtY2lwaGVydGV4dA==",
-    iv: "q8F2/K10Lx==",
-  },
-  {
-    id: "sec_first_name_1",
-    ref: "FIRST_NAME_1",
-    category: "NAME",
-    label: "First Name",
-    decryptedValue: "Ayush",
-    encryptedCiphertext: "Zmlyc3QtbmFtZS1hZXMtZ2NtLTI1Ng==",
-    iv: "a1B2/C34Dx==",
-  },
-  {
-    id: "sec_last_name_1",
-    ref: "LAST_NAME_1",
-    category: "NAME",
-    label: "Last Name",
-    decryptedValue: "Raj",
-    encryptedCiphertext: "bGFzdC1uYW1lLWFlcy1nY20tMjU2",
-    iv: "e5F6/G78Hx==",
-  },
-  {
-    id: "sec_email_1",
-    ref: "EMAIL_1",
-    category: "EMAIL",
-    label: "Registered Email",
-    decryptedValue: "amritmohan201205@gmail.com",
-    encryptedCiphertext: "ZXhhbXBsZS1lbmNyeXB0ZWQtZW1haWwtYmxvYi0xMjg=",
-    iv: "m9P3/Z88Ka==",
-  },
-  {
-    id: "sec_password_1",
-    ref: "PASSWORD_1",
-    category: "CUSTOM",
-    label: "Master Password",
-    decryptedValue: "Amrit@12345",
-    encryptedCiphertext: "cGFzc3dvcmQtYWVzLWdjbS1wYXlsb2FkLXZhbHVl",
-    iv: "w4E5/P78Qx==",
-  },
-  {
-    id: "sec_phone_1",
-    ref: "PHONE_1",
-    category: "PHONE",
-    label: "Primary Mobile",
-    decryptedValue: "9876543210",
-    encryptedCiphertext: "cGhvbmUtYWVzLWdjbS1wYXlsb2FkLXZhbHVlLTk5",
-    iv: "k7A1/L44Bx==",
-  },
-  {
-    id: "sec_dob_1",
-    ref: "DOB_1",
-    category: "DOB",
-    label: "Date of Birth",
-    decryptedValue: "1998-05-15",
-    encryptedCiphertext: "ZG9iLWFlcy1nY20tMjU2",
-    iv: "d3E4/R56Ty==",
-  },
-  {
-    id: "sec_pan_1",
-    ref: "PAN_1",
-    category: "GOVID",
-    label: "PAN Number",
-    decryptedValue: "ABCDE1234F",
-    encryptedCiphertext: "cGFuLWFlcy1nY20tMjU2",
-    iv: "p1A2/N34Zx==",
-  },
-  {
-    id: "sec_aadhaar_1",
-    ref: "AADHAAR_1",
-    category: "GOVID",
-    label: "Aadhaar Number",
-    decryptedValue: "1234 5678 9012",
-    encryptedCiphertext: "YWFkaGFhci1hZXMtZ2NtLTI1Ng==",
-    iv: "u5I6/O78Px==",
-  },
-  {
-    id: "sec_address_1",
-    ref: "ADDRESS_1",
-    category: "ADDRESS",
-    label: "Address Line 1",
-    decryptedValue: "402, Lotus Towers, SV Road",
-    encryptedCiphertext: "YWRkcmVzcy1hZXMtZ2NtLTI1Ng==",
-    iv: "s1D2/F34Gx==",
-  },
-  {
-    id: "sec_city_1",
-    ref: "CITY_1",
-    category: "ADDRESS",
-    label: "City",
-    decryptedValue: "Mumbai",
-    encryptedCiphertext: "Y2l0eS1hZXMtZ2NtLTI1Ng==",
-    iv: "c1I2/T34Yx==",
-  },
-  {
-    id: "sec_state_1",
-    ref: "STATE_1",
-    category: "ADDRESS",
-    label: "State",
-    decryptedValue: "MH",
-    encryptedCiphertext: "c3RhdGUtYWVzLWdjbS1wYXlsb2Fk",
-    iv: "s9T8/A76Qx==",
-  },
-  {
-    id: "sec_pincode_1",
-    ref: "PINCODE_1",
-    category: "ADDRESS",
-    label: "PIN Code",
-    decryptedValue: "400001",
-    encryptedCiphertext: "cGluY29kZS1hZXMtZ2NtLTI1Ng==",
-    iv: "z1X2/C34Vx==",
-  },
-  {
-    id: "sec_policy_1",
-    ref: "POLICY_1",
-    category: "POLICY",
-    label: "Health Policy Number",
-    decryptedValue: "POL12345",
-    encryptedCiphertext: "cG9saWN5LWNlcnRpZmljYXRlLWtleS0yMDI2",
-    iv: "v4C9/T12Qz==",
-  },
-];
-
 function getStorageKey(tabId: number): string {
   return `browserAgent.lastResult.${tabId}`;
+}
+
+function inferSecretMetadata(key: string, existingRefs: string[]): { ref: string; category: string; label: string } {
+  const normalized = key.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!normalized) throw new Error("Key is required.");
+
+  const aliases: Record<string, string> = {
+    FULLNAME: "NAME", FULL_NAME: "NAME", YOUR_NAME: "NAME",
+    FIRSTNAME: "FIRST_NAME", LASTNAME: "LAST_NAME",
+    EMAIL_ADDRESS: "EMAIL", MAIL: "EMAIL",
+    MOBILE: "PHONE", MOBILE_NUMBER: "PHONE", TELEPHONE: "PHONE", PHONE_NUMBER: "PHONE",
+    DATE_OF_BIRTH: "DOB", BIRTH_DATE: "DOB",
+    ZIP: "PINCODE", ZIP_CODE: "PINCODE", PIN_CODE: "PINCODE", POSTAL_CODE: "PINCODE",
+    PAN_NUMBER: "PAN", AADHAR: "AADHAAR", AADHAAR_NUMBER: "AADHAAR",
+  };
+  const withoutSuffix = normalized.replace(/_\d+$/, "");
+  const base = aliases[normalized] || aliases[withoutSuffix] || withoutSuffix;
+  const refPrefix = base || "CUSTOM";
+  let suffix = 1;
+  while (existingRefs.includes(`${refPrefix}_${suffix}`)) suffix++;
+  const ref = `${refPrefix}_${suffix}`;
+
+  const category = /^(NAME|FIRST_NAME|LAST_NAME|EMAIL|PHONE|DOB|PAN|AADHAAR|GOVID|ADDRESS|CITY|STATE|PINCODE|POLICY|PASSWORD|AMOUNT|CARD)$/.test(refPrefix)
+    ? refPrefix
+    : "CUSTOM";
+  const label = refPrefix.toLowerCase().split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+  return { ref, category, label };
 }
 
 function getFieldToken(
@@ -184,9 +83,10 @@ export default function App() {
   const [task, setTask] = useState("Fill out this form with my saved information");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AskAIResult | null>(null);
-  const [vaultSecrets, setVaultSecrets] = useState<StoredVaultSecret[]>(INITIAL_VAULT);
+  const [vaultSecrets, setVaultSecrets] = useState<StoredVaultSecret[]>([]);
   const [editingRef, setEditingRef] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [newSecret, setNewSecret] = useState({ key: "", value: "" });
   const [userProtectedFieldIds, setUserProtectedFieldIds] = useState<UserProtectedFieldIds>([]);
   const [executionTiming, setExecutionTiming] = useState<{
     nerMs: number;
@@ -194,6 +94,7 @@ export default function App() {
     vlmMs: number;
     domMs: number;
   } | null>(null);
+  const taskStartedRef = useRef(false);
 
   useEffect(() => {
     async function restoreOrAnalyze() {
@@ -219,12 +120,14 @@ export default function App() {
         const stored = await browser.storage.local.get(storageKey);
         const last = stored[storageKey] as AskAIResult | undefined;
 
+        if (taskStartedRef.current) return;
+
         if (last && last.analysis) {
           setResult(last);
           setUserProtectedFieldIds(last.userProtectedFieldIds ?? []);
         } else {
           const resp = await browser.tabs.sendMessage(tab.id, { type: "ANALYZE_PAGE" });
-          if (resp && resp.analysis) {
+          if (!taskStartedRef.current && resp && resp.analysis) {
             const autoRes: AskAIResult = {
               type: "ASK_AI_RESULT",
               sensitiveItemsProtected: resp.analysis.fields.filter((f: any) => f.sensitive).length,
@@ -247,6 +150,9 @@ export default function App() {
   async function handleAskAI() {
     if (!task.trim() || loading) return;
 
+    // Prevent the asynchronous initial page analysis from replacing the
+    // response for this user-initiated task.
+    taskStartedRef.current = true;
     setLoading(true);
     const start = performance.now();
 
@@ -286,6 +192,23 @@ export default function App() {
     }
   }
 
+  async function handleAddSecret() {
+    try {
+      const metadata = inferSecretMetadata(newSecret.key, vaultSecrets.map((secret) => secret.ref));
+      await saveVaultSecret(metadata.ref, metadata.category, metadata.label, newSecret.value);
+      setVaultSecrets(await getAllVaultSecrets());
+      setNewSecret({ key: "", value: "" });
+    } catch (err) {
+      console.error("Failed to add secret to IndexedDB:", err);
+    }
+  }
+
+  async function handleDeleteSecret(ref: string) {
+    await deleteVaultSecret(ref);
+    setVaultSecrets(await getAllVaultSecrets());
+    if (editingRef === ref) setEditingRef(null);
+  }
+
   return (
     <main className="app">
       {/* Header */}
@@ -293,9 +216,9 @@ export default function App() {
         <div className="app__brand">
           <div className="app__logo" aria-hidden="true">◈</div>
           <div>
-            <h1 style={{ margin: 0, fontSize: "16px" }}>Browser Agent</h1>
+            <h1 style={{ margin: 0, fontSize: "16px" }}>THE BROWSER CODE</h1>
             <p style={{ margin: 0, fontSize: "11px", color: "#64748b" }}>
-              SIH26171 Privacy-Preserving Agent
+              privacy guard vision agent
             </p>
           </div>
         </div>
@@ -437,7 +360,7 @@ export default function App() {
                 <>
                   {result.error}
                   <strong style={{ display: "block", marginTop: "4px", color: "#b91c1c" }}>
-                    👉 Refresh (F5) this webpage tab, then click Run Automated Agent again!
+                    👉 Check the task and IndexedDB Vault, then try again.
                   </strong>
                 </>
               ) : (
@@ -531,6 +454,15 @@ export default function App() {
             <em>Values are encrypted locally on disk before storage.</em>
           </div>
 
+          <div style={{ background: "#ffffff", border: "1px solid #cbd5e1", padding: "8px", borderRadius: "6px", display: "grid", gap: "6px" }}>
+            <strong style={{ fontSize: "11px" }}>Add saved information (Key / Value only)</strong>
+            <input aria-label="Key" placeholder="Key" value={newSecret.key} onChange={(e) => setNewSecret({ ...newSecret, key: e.target.value })} />
+            <input placeholder="Value" value={newSecret.value} onChange={(e) => setNewSecret({ ...newSecret, value: e.target.value })} />
+            <button type="button" onClick={handleAddSecret} disabled={!newSecret.key || !newSecret.value} style={{ background: "#0284c7", color: "white", border: "none", padding: "6px", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontWeight: 600 }}>
+              Add to IndexedDB
+            </button>
+          </div>
+
           <div style={{ maxHeight: "280px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
             {vaultSecrets.map((sec) => (
               <div
@@ -558,7 +490,7 @@ export default function App() {
                       onChange={(e) => setEditValue(e.target.value)}
                       style={{ flex: 1, padding: "4px 8px", fontSize: "12px", border: "1px solid #0284c7", borderRadius: "4px" }}
                     />
-                    <button
+                     <button
                       type="button"
                       onClick={() => handleSaveEdit(sec.ref)}
                       style={{ background: "#16a34a", color: "white", border: "none", padding: "4px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontWeight: 600 }}
@@ -586,8 +518,15 @@ export default function App() {
                       }}
                       style={{ background: "transparent", border: "1px solid #cbd5e1", borderRadius: "4px", padding: "2px 6px", fontSize: "10px", cursor: "pointer" }}
                     >
-                      ✏️ Edit
-                    </button>
+                       ✏️ Edit
+                     </button>
+                     <button
+                       type="button"
+                       onClick={() => void handleDeleteSecret(sec.ref)}
+                       style={{ background: "transparent", border: "1px solid #fecaca", color: "#b91c1c", borderRadius: "4px", padding: "2px 6px", fontSize: "10px", cursor: "pointer" }}
+                     >
+                       🗑️ Delete
+                     </button>
                   </div>
                 )}
 

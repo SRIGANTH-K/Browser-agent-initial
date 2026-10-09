@@ -56,7 +56,7 @@ app.use('/api', authMiddleware, reasonRouter);
 if (process.env.NODE_ENV !== 'test') {
   app.listen(config.port, () => {
     console.log(`[Backend Service] Running on http://localhost:${config.port}`);
-    console.log(`[Backend Service] VLM Provider: ${config.vlmProvider} | Model: ${config.vlmModel} | API Key: ${config.vlmApiKey ? '✓ configured' : '✗ missing (mock mode)'}`);
+    console.log(`[Backend Service] VLM Provider: ${config.vlmProvider} | Model: ${config.vlmModel} | API Key: ${config.vlmApiKey ? '✓ configured' : '✗ missing'}`);
   });
 }
 

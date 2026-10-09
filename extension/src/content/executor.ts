@@ -36,20 +36,22 @@ function triggerInputEvents(element: HTMLElement, newValue: string): void {
       "value"
     )?.set;
 
+    const valueForElement = normalizeValueForElement(element, newValue);
+
     if (valueSetter) {
-      valueSetter.call(element, newValue);
+      valueSetter.call(element, valueForElement);
     } else {
-      element.value = newValue;
+      element.value = valueForElement;
     }
 
-    element.setAttribute("value", newValue);
+    element.setAttribute("value", valueForElement);
 
     try {
       element.dispatchEvent(
         new InputEvent("input", {
           bubbles: true,
           cancelable: true,
-          data: newValue,
+          data: valueForElement,
           inputType: "insertText",
         })
       );
@@ -62,6 +64,18 @@ function triggerInputEvents(element: HTMLElement, newValue: string): void {
     element.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true }));
     element.dispatchEvent(new Event("blur", { bubbles: true }));
   }
+}
+
+/** Converts common human-entered dates to the ISO format required by input[type=date]. */
+function normalizeValueForElement(element: HTMLElement, value: string): string {
+  if (!(element instanceof HTMLInputElement) || element.type !== "date") return value;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+
+  const match = value.trim().match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (!match) return value;
+
+  const [, day, month, year] = match;
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
 }
 
 /**

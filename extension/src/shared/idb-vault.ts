@@ -32,29 +32,6 @@ interface StoredSecretEntry {
   updatedAt: number;
 }
 
-const DEFAULT_SEED_SECRETS: Array<{
-  ref: string;
-  category: string;
-  label: string;
-  value: string;
-}> = [
-  { ref: "NAME_1", category: "NAME", label: "Full Name", value: "Amrit Mohan" },
-  { ref: "FIRST_NAME_1", category: "NAME", label: "First Name", value: "Amrit" },
-  { ref: "LAST_NAME_1", category: "NAME", label: "Last Name", value: "Mohan" },
-  { ref: "EMAIL_1", category: "EMAIL", label: "Primary Email", value: "amritmohan201205@gmail.com" },
-  { ref: "PASSWORD_1", category: "CUSTOM", label: "Master Password", value: "Amrit@12345" },
-  { ref: "PHONE_1", category: "PHONE", label: "Primary Mobile", value: "9876543210" },
-  { ref: "DOB_1", category: "DOB", label: "Date of Birth", value: "1998-05-15" },
-  { ref: "PAN_1", category: "GOVID", label: "PAN Number", value: "ABCDE1234F" },
-  { ref: "AADHAAR_1", category: "GOVID", label: "Aadhaar Number", value: "1234 5678 9012" },
-  { ref: "ADDRESS_1", category: "ADDRESS", label: "Address Line 1", value: "402, Lotus Towers, SV Road" },
-  { ref: "CITY_1", category: "ADDRESS", label: "City", value: "Mumbai" },
-  { ref: "STATE_1", category: "ADDRESS", label: "State", value: "MH" },
-  { ref: "PINCODE_1", category: "ADDRESS", label: "PIN Code", value: "400001" },
-  { ref: "POLICY_1", category: "POLICY", label: "Health Policy Number", value: "POL12345" },
-  { ref: "AMOUNT_1", category: "CUSTOM", label: "Claim Amount", value: "Rs. 50,000" },
-];
-
 let cachedKey: CryptoKey | null = null;
 
 /**
@@ -196,53 +173,11 @@ async function decryptWithAES(ciphertext: string, ivBase64: string, key: CryptoK
   }
 }
 
-/**
- * Initializes the IndexedDB vault and seeds default synthetic profiles if empty.
- */
+/** Initializes the empty-on-first-run IndexedDB vault. */
 export async function initIndexedDBVault(): Promise<void> {
   const db = await openIDB();
-  const key = await getOrCreateEncryptionKey();
-
-  const existingKeys = await new Promise<string[]>((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readonly");
-    const store = tx.objectStore(STORE_NAME);
-    const req = store.getAllKeys();
-    req.onsuccess = () => resolve(req.result as string[]);
-    req.onerror = () => reject(req.error);
-  });
-
-  const existingSet = new Set(existingKeys);
-  const missingSeeds = DEFAULT_SEED_SECRETS.filter(
-    (seed) => !existingSet.has(`sec_${seed.ref.toLowerCase()}`)
-  );
-
-  if (missingSeeds.length > 0) {
-    console.log(`[IndexedDB-Vault] Seeding ${missingSeeds.length} missing records into ${DB_NAME}`);
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-
-    for (const seed of missingSeeds) {
-      const { ciphertext, iv } = await encryptWithAES(seed.value, key);
-      const entry: StoredSecretEntry = {
-        id: `sec_${seed.ref.toLowerCase()}`,
-        referenceKey: seed.ref,
-        category: seed.category,
-        label: seed.label,
-        domain: "*",
-        ciphertext,
-        iv,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      store.put(entry);
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    console.log(`[IndexedDB-Vault] ✅ Synchronized ${missingSeeds.length} new records (including PASSWORD_1) into "${DB_NAME}".`);
-  }
+  await getOrCreateEncryptionKey();
+  db.close();
 }
 
 
@@ -288,6 +223,9 @@ export async function saveVaultSecret(
   label: string,
   plaintext: string
 ): Promise<void> {
+  if (!ref.trim() || !category.trim() || !label.trim() || !plaintext.trim()) {
+    throw new Error("Reference, category, label, and value are required.");
+  }
   await initIndexedDBVault();
   const db = await openIDB();
   const key = await getOrCreateEncryptionKey();
@@ -316,6 +254,18 @@ export async function saveVaultSecret(
   console.log(`[IndexedDB-Vault] 🔐 Encrypted & updated "${ref}" in ${DB_NAME}`);
 }
 
+/** Permanently removes a user-managed secret from IndexedDB. */
+export async function deleteVaultSecret(ref: string): Promise<void> {
+  await initIndexedDBVault();
+  const db = await openIDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).delete(`sec_${ref.toLowerCase()}`);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 /**
  * Resolves a reference token (e.g. "NAME_1", "EMAIL_1") by querying IndexedDB and decrypting on-device.
  */
@@ -340,34 +290,24 @@ export async function resolveVaultReference(ref: string): Promise<string> {
       return await decryptWithAES(entry.ciphertext, entry.iv, key);
     }
 
-    // Dynamic alias resolution
-    if (normalizedRef.startsWith("FIRST_NAME")) {
-      const fullName = await resolveVaultReference("NAME_1");
-      return fullName ? fullName.split(" ")[0] : "";
+    // Preserve compatibility with keys entered before semantic key normalization.
+    const canonical = (value: string) => value
+      .toUpperCase()
+      .replace(/MOBILE_NUMBER/g, "PHONE")
+      .replace(/PHONE_NUMBER/g, "PHONE")
+      .replace(/PIN_CODE/g, "PINCODE")
+      .replace(/ZIP_CODE/g, "PINCODE");
+    const allEntries = await new Promise<StoredSecretEntry[]>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const req = tx.objectStore(STORE_NAME).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+    const compatibleEntry = allEntries.find((candidate) => canonical(candidate.referenceKey) === canonical(normalizedRef));
+    if (compatibleEntry) {
+      return await decryptWithAES(compatibleEntry.ciphertext, compatibleEntry.iv, key);
     }
-    if (normalizedRef.startsWith("LAST_NAME")) {
-      const fullName = await resolveVaultReference("NAME_1");
-      if (fullName) {
-        const parts = fullName.split(" ");
-        return parts.length > 1 ? parts.slice(1).join(" ") : "";
-      }
-    }
-    if (normalizedRef.startsWith("PAN")) {
-      return await resolveVaultReference("PAN_1");
-    }
-    if (normalizedRef.startsWith("AADHAAR")) {
-      return await resolveVaultReference("AADHAAR_1");
-    }
-    if (normalizedRef.startsWith("GOVID")) {
-      const pan = await resolveVaultReference("PAN_1");
-      return pan || await resolveVaultReference("AADHAAR_1");
-    }
-    if (normalizedRef.startsWith("PHONE") || normalizedRef.startsWith("MOBILE")) {
-      return await resolveVaultReference("PHONE_1");
-    }
-    if (normalizedRef.startsWith("POLICY")) {
-      return await resolveVaultReference("POLICY_1");
-    }
+
   } catch (err) {
     console.error("[IndexedDB-Vault] Error resolving reference:", err);
   }
